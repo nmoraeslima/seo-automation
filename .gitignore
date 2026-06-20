@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Secrets / credentials
+.env
+*.env
+!.env.example
+service_account.json
+credentials.json
+token.json
+secrets/
+
+# Outputs / logs
+*.log
+output/
+.cache/
+
+# OS
+.DS_Store
