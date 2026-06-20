@@ -85,12 +85,22 @@ class WindsorClient:
         """Dados de query do Google Search Console via Windsor."""
         fields = ["query", "page", "clicks", "impressions", "ctr", "position"]
         extra = {"account": account} if account else None
-        rows = self.fetch(
-            connector,
-            fields=fields,
-            date_preset=date_preset,
-            extra_params=extra,
-        )
+        try:
+            rows = self.fetch(
+                connector,
+                fields=fields,
+                date_preset=date_preset,
+                extra_params=extra,
+            )
+        except WindsorError as exc:
+            # Search Console pode nao estar conectado nesta conta do Windsor.
+            if "connector" in str(exc).lower():
+                print(
+                    f"[aviso] Windsor sem conector '{connector}' "
+                    "(Search Console nao conectado?); briefing sem dados organicos."
+                )
+                return []
+            raise
         result: list[SearchConsoleRow] = []
         for r in rows:
             result.append(

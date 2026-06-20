@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from .config import ClientConfig, Settings
+from .config import REPO_ROOT, ClientConfig, Settings
 from .google_clients import GoogleClients
 from .llm import LLMClient
 from .windsor import SearchConsoleRow, WindsorClient
@@ -159,14 +159,43 @@ def _briefing_doc_blocks(
     return blocks
 
 
+def _write_briefing_markdown(
+    client: ClientConfig, b: KeywordBriefing
+) -> str:
+    out_dir = REPO_ROOT / "output"
+    out_dir.mkdir(exist_ok=True)
+    path = out_dir / f"briefing-{client.slug}-{_kw_slug(b.keyword)}.md"
+    lines = []
+    for style, text in _briefing_doc_blocks(client, b):
+        if style == "TITLE":
+            lines.append(f"# {text}")
+        elif style == "HEADING_1":
+            lines.append(f"## {text}")
+        elif style == "BULLET":
+            lines.append(f"- {text}")
+        else:
+            lines.append(text)
+        lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return str(path)
+
+
+def _kw_slug(keyword: str) -> str:
+    return "".join(c if c.isalnum() else "-" for c in keyword.lower()).strip("-")
+
+
 def run_briefings_for_client(
     client: ClientConfig,
     settings: Settings,
-    google: GoogleClients,
+    google: GoogleClients | None,
     windsor: WindsorClient,
     llm: LLMClient | None,
 ) -> list[tuple[KeywordBriefing, str]]:
-    """Gera os briefings de um cliente. Retorna [(briefing, doc_url)]."""
+    """Gera os briefings de um cliente. Retorna [(briefing, destino)].
+
+    Cria Google Docs se houver service account; caso contrario escreve
+    arquivos Markdown locais em output/.
+    """
     rows = windsor.search_console(
         account=client.windsor_account or None,
     )
@@ -176,13 +205,16 @@ def run_briefings_for_client(
 
     for keyword in client.keywords:
         b = build_keyword_briefing(keyword, rows, llm)
-        doc_id = google.create_doc(
-            f"Briefing SEO - {client.name} - {keyword}",
-            folder_id=client.drive_folder_id or None,
-        )
-        google.write_doc_markdown(doc_id, _briefing_doc_blocks(client, b))
-        url = google.doc_url(doc_id)
-        results.append((b, url))
+        if google:
+            doc_id = google.create_doc(
+                f"Briefing SEO - {client.name} - {keyword}",
+                folder_id=client.drive_folder_id or None,
+            )
+            google.write_doc_markdown(doc_id, _briefing_doc_blocks(client, b))
+            dest = google.doc_url(doc_id)
+        else:
+            dest = _write_briefing_markdown(client, b)
+        results.append((b, dest))
         index_rows.append(
             [
                 today,
@@ -192,11 +224,11 @@ def run_briefings_for_client(
                 int(b.clicks),
                 int(b.impressions),
                 f"{b.ctr * 100:.2f}%",
-                url,
+                dest,
             ]
         )
 
-    if settings.control_spreadsheet_id and index_rows:
+    if google and settings.control_spreadsheet_id and index_rows:
         google.ensure_sheet(settings.control_spreadsheet_id, INDEX_SHEET)
         existing = google.read_range(
             settings.control_spreadsheet_id, f"{INDEX_SHEET}!A1:A1"

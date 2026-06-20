@@ -6,6 +6,7 @@ tecnico. Gera uma lista de issues e escreve em uma aba do Google Sheets.
 
 from __future__ import annotations
 
+import csv
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -15,7 +16,7 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
-from .config import ClientConfig, Settings
+from .config import REPO_ROOT, ClientConfig, Settings
 from .google_clients import GoogleClients
 
 USER_AGENT = "SEO-Automation-Bot/1.0 (+https://windsor.ai)"
@@ -246,26 +247,50 @@ def check_site_files(site_url: str) -> list[Issue]:
 def run_audit_for_client(
     client: ClientConfig,
     settings: Settings,
-    google: GoogleClients,
-) -> list[Issue]:
+    google: GoogleClients | None,
+) -> tuple[list[Issue], str]:
+    """Roda a auditoria. Retorna (issues, destino).
+
+    Escreve no Google Sheets se houver service account + spreadsheet id;
+    caso contrario salva um CSV local em output/ e retorna o caminho.
+    """
     if not client.site_url:
-        return []
+        return [], ""
     pages = crawl(client.site_url, client.audit_max_pages)
     issues = analyze(pages) + check_site_files(client.site_url)
 
     severity_order = {"Alta": 0, "Media": 1, "Baixa": 2}
     issues.sort(key=lambda i: severity_order.get(i.severity, 3))
 
-    if settings.control_spreadsheet_id:
+    summary = (
+        f"Auditoria de {client.site_url} | "
+        f"{datetime.now(timezone.utc):%d/%m/%Y %H:%M UTC} | "
+        f"{len(pages)} paginas | {len(issues)} problemas "
+        f"(Alta: {sum(1 for i in issues if i.severity == 'Alta')}, "
+        f"Media: {sum(1 for i in issues if i.severity == 'Media')}, "
+        f"Baixa: {sum(1 for i in issues if i.severity == 'Baixa')})"
+    )
+
+    if google and settings.control_spreadsheet_id:
         sheet = f"Auditoria - {client.name}"[:99]
-        summary = (
-            f"Auditoria de {client.site_url} | "
-            f"{datetime.now(timezone.utc):%d/%m/%Y %H:%M UTC} | "
-            f"{len(pages)} paginas | {len(issues)} problemas "
-            f"(Alta: {sum(1 for i in issues if i.severity == 'Alta')}, "
-            f"Media: {sum(1 for i in issues if i.severity == 'Media')}, "
-            f"Baixa: {sum(1 for i in issues if i.severity == 'Baixa')})"
-        )
         rows = [[summary], [], AUDIT_HEADER] + [i.as_row() for i in issues]
         google.overwrite_sheet(settings.control_spreadsheet_id, sheet, rows)
-    return issues
+        return issues, f"Sheets: aba '{sheet}'"
+
+    return issues, _write_audit_csv(client, summary, issues)
+
+
+def _write_audit_csv(
+    client: ClientConfig, summary: str, issues: list[Issue]
+) -> str:
+    out_dir = REPO_ROOT / "output"
+    out_dir.mkdir(exist_ok=True)
+    path = out_dir / f"auditoria-{client.slug}.csv"
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow([summary])
+        writer.writerow([])
+        writer.writerow(AUDIT_HEADER)
+        for issue in issues:
+            writer.writerow(issue.as_row())
+    return str(path)

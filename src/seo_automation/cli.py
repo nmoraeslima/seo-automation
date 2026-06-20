@@ -13,38 +13,46 @@ from .llm import LLMClient
 from .windsor import WindsorClient
 
 
-def _build_context(need_windsor: bool):
-    settings = Settings.from_env()
-    google = GoogleClients(settings.service_account_path)
-    windsor = (
-        WindsorClient(settings.windsor_api_key) if need_windsor else None
+def _build_google(settings: Settings) -> GoogleClients | None:
+    """Constroi o cliente Google se a service account existir; senao None.
+
+    Sem Google, as automacoes caem para saida local (CSV/Markdown em output/).
+    """
+    if settings.service_account_path.exists():
+        return GoogleClients(settings.service_account_path)
+    print(
+        "[aviso] service account do Google nao encontrada "
+        f"({settings.service_account_path}); usando saida local em output/."
     )
-    llm = LLMClient(settings.openai_api_key, settings.openai_model)
-    return settings, google, windsor, llm
+    return None
 
 
 def cmd_briefings(args) -> int:
-    settings, google, windsor, llm = _build_context(need_windsor=True)
+    settings = Settings.from_env()
+    google = _build_google(settings)
+    windsor = WindsorClient(settings.windsor_api_key)
+    llm = LLMClient(settings.openai_api_key, settings.openai_model)
     clients = load_clients(args.clients)
     for client in clients:
         if not client.keywords:
             continue
         print(f"[briefings] {client.name} ({len(client.keywords)} keywords)")
         results = run_briefings_for_client(client, settings, google, windsor, llm)
-        for briefing, url in results:
-            print(f"  - {briefing.keyword}: {url}")
+        for briefing, dest in results:
+            print(f"  - {briefing.keyword}: {dest}")
     return 0
 
 
 def cmd_audit(args) -> int:
-    settings, google, windsor, llm = _build_context(need_windsor=False)
+    settings = Settings.from_env()
+    google = _build_google(settings)
     clients = load_clients(args.clients)
     for client in clients:
         if not client.site_url:
             continue
         print(f"[audit] {client.name} -> {client.site_url}")
-        issues = run_audit_for_client(client, settings, google)
-        print(f"  {len(issues)} problemas encontrados")
+        issues, dest = run_audit_for_client(client, settings, google)
+        print(f"  {len(issues)} problemas encontrados -> {dest}")
     return 0
 
 
