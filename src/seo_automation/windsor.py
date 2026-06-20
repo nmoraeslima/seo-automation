@@ -80,7 +80,7 @@ class WindsorClient:
         *,
         date_preset: str = "last_28d",
         account: str | None = None,
-        connector: str = "google_search_console",
+        connector: str = "searchconsole",
     ) -> list[SearchConsoleRow]:
         """Dados de query do Google Search Console via Windsor."""
         fields = ["query", "page", "clicks", "impressions", "ctr", "position"]
@@ -93,10 +93,12 @@ class WindsorClient:
                 extra_params=extra,
             )
         except WindsorError as exc:
-            # Search Console pode nao estar conectado nesta conta do Windsor.
-            if "connector" in str(exc).lower():
+            # Search Console pode nao estar conectado nesta conta do Windsor:
+            # ou o conector nao existe, ou nenhuma conta foi adicionada.
+            msg = str(exc).lower()
+            if "connector" in msg or "account" in msg or "was found" in msg:
                 print(
-                    f"[aviso] Windsor sem conector '{connector}' "
+                    f"[aviso] Windsor sem dados de '{connector}' "
                     "(Search Console nao conectado?); briefing sem dados organicos."
                 )
                 return []
