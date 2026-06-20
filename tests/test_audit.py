@@ -40,6 +40,14 @@ def test_detects_broken_status_and_noindex():
     assert "Pagina com noindex" in problems
 
 
+def test_rate_limit_is_inconclusive_not_broken():
+    pages = [_page("https://a.com/rl", status=429)]
+    issues = analyze(pages)
+    problems = {i.problem for i in issues}
+    assert "Inconclusivo (HTTP 429)" in problems
+    assert "Status 429" not in problems
+
+
 def test_detects_missing_h1_and_images_alt():
     pages = [_page("https://a.com/x", h1s=[], images_without_alt=3)]
     issues = analyze(pages)

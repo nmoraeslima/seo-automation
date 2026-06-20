@@ -13,13 +13,36 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import urljoin, urlparse
 
-import requests
 from bs4 import BeautifulSoup
 
 from .config import REPO_ROOT, ClientConfig, Settings
 from .google_clients import GoogleClients
 
-USER_AGENT = "SEO-Automation-Bot/1.0 (+https://windsor.ai)"
+# Muitos sites (Cloudflare/Shopify) bloqueiam o `requests` por fingerprint de TLS.
+# curl_cffi imita o handshake de um Chrome real e passa nessas protecoes.
+try:
+    from curl_cffi import requests as _http
+    from curl_cffi.requests.exceptions import RequestException as HTTPError
+
+    _IMPERSONATE = "chrome"
+except ImportError:  # fallback se curl_cffi nao estiver instalado
+    import requests as _http
+    from requests import RequestException as HTTPError
+
+    _IMPERSONATE = None
+
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+DEFAULT_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+}
 AUDIT_HEADER = ["URL", "Problema", "Severidade", "Detalhe", "Recomendacao"]
 
 
@@ -58,17 +81,56 @@ def _normalize(url: str) -> str:
     return parsed._replace(fragment="").geturl()
 
 
-def fetch_page(session: requests.Session, url: str) -> PageData | None:
+def _new_session():
+    """Cria uma sessao HTTP (curl_cffi se disponivel, senao requests)."""
+    session = _http.Session()
+    session.headers.update(DEFAULT_HEADERS)
+    return session
+
+
+def _do_get(session, url):
+    if _IMPERSONATE:
+        return session.get(
+            url, timeout=20, allow_redirects=True, impersonate=_IMPERSONATE
+        )
+    return session.get(url, timeout=20, allow_redirects=True)
+
+
+def _get_with_backoff(session, url: str, max_retries: int = 2):
+    """GET respeitando Retry-After em 429/503 (crawl educado)."""
+    resp = _do_get(session, url)
+    attempts = 0
+    while resp.status_code in (429, 503) and attempts < max_retries:
+        retry_after = resp.headers.get("Retry-After")
+        try:
+            wait = min(float(retry_after), 10.0) if retry_after else 2.0 * (attempts + 1)
+        except ValueError:
+            wait = 2.0 * (attempts + 1)
+        time.sleep(wait)
+        resp = _do_get(session, url)
+        attempts += 1
+    return resp
+
+
+def fetch_page(session, url: str) -> PageData | None:
     start = time.time()
     try:
-        resp = session.get(url, timeout=20, allow_redirects=True)
-    except requests.RequestException:
-        return PageData(url, 0, "", "", [], 0, False, 0, [])
+        resp = _get_with_backoff(session, url)
+    except HTTPError:
+        return PageData(
+            url=url, status=0, title="", meta_description="", h1s=[],
+            images_without_alt=0, has_canonical=False, noindex=False,
+            load_ms=0, links=[],
+        )
     load_ms = int((time.time() - start) * 1000)
 
     content_type = resp.headers.get("Content-Type", "")
     if "text/html" not in content_type:
-        return PageData(url, resp.status_code, "", "", [], 0, False, load_ms, [])
+        return PageData(
+            url=url, status=resp.status_code, title="", meta_description="",
+            h1s=[], images_without_alt=0, has_canonical=False, noindex=False,
+            load_ms=load_ms, links=[],
+        )
 
     soup = BeautifulSoup(resp.text, "lxml")
     title = (soup.title.string or "").strip() if soup.title else ""
@@ -103,9 +165,10 @@ def fetch_page(session: requests.Session, url: str) -> PageData | None:
     )
 
 
-def crawl(site_url: str, max_pages: int = 100) -> list[PageData]:
-    session = requests.Session()
-    session.headers.update({"User-Agent": USER_AGENT})
+def crawl(
+    site_url: str, max_pages: int = 100, delay: float = 0.7
+) -> list[PageData]:
+    session = _new_session()
 
     start = _normalize(site_url)
     queue: deque[str] = deque([start])
@@ -115,6 +178,8 @@ def crawl(site_url: str, max_pages: int = 100) -> list[PageData]:
     while queue and len(pages) < max_pages:
         url = queue.popleft()
         page = fetch_page(session, url)
+        if delay:
+            time.sleep(delay)
         if page is None:
             continue
         pages.append(page)
@@ -135,6 +200,13 @@ def analyze(pages: list[PageData]) -> list[Issue]:
             issues.append(
                 Issue(p.url, "Pagina inacessivel", "Alta", "Falha ao carregar",
                       "Verificar disponibilidade/erro de servidor.")
+            )
+            continue
+        if p.status in (429, 503):
+            issues.append(
+                Issue(p.url, f"Inconclusivo (HTTP {p.status})", "Media",
+                      "Servidor limitou as requisicoes (rate limit)",
+                      "Revisar manualmente; reduzir velocidade do crawl.")
             )
             continue
         if p.status >= 400:
@@ -225,18 +297,23 @@ def analyze(pages: list[PageData]) -> list[Issue]:
 def check_site_files(site_url: str) -> list[Issue]:
     issues: list[Issue] = []
     base = f"{urlparse(site_url).scheme}://{urlparse(site_url).netloc}"
-    session = requests.Session()
-    session.headers.update({"User-Agent": USER_AGENT})
+    session = _new_session()
     for path, name in [("/robots.txt", "robots.txt"), ("/sitemap.xml", "sitemap.xml")]:
         try:
-            r = session.get(base + path, timeout=15)
-            if r.status_code >= 400:
+            r = _get_with_backoff(session, base + path)
+            if r.status_code in (429, 503):
+                issues.append(
+                    Issue(base + path, f"{name}: inconclusivo (HTTP {r.status_code})",
+                          "Media", "Servidor limitou as requisicoes (rate limit)",
+                          f"Revisar {name} manualmente.")
+                )
+            elif r.status_code >= 400:
                 issues.append(
                     Issue(base + path, f"{name} ausente", "Media",
                           f"HTTP {r.status_code}",
                           f"Publicar {name} valido.")
                 )
-        except requests.RequestException:
+        except HTTPError:
             issues.append(
                 Issue(base + path, f"{name} inacessivel", "Media",
                       "Falha na requisicao", f"Publicar {name} valido.")
