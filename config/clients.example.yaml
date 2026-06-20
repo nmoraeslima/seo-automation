@@ -1,0 +1,22 @@
+# Configuracao dos clientes da agencia.
+# Copie para config/clients.yaml e ajuste para cada cliente.
+#
+# Campos:
+#   name             -> nome do cliente (usado em titulos e nomes de arquivos)
+#   site_url         -> URL base do site (usada na auditoria tecnica #8)
+#   windsor_account  -> identificador da conta no Windsor (opcional, p/ filtrar dados)
+#   keywords         -> palavras-chave alvo para gerar briefings (#5)
+#   drive_folder_id  -> ID da pasta no Google Drive onde salvar os Docs do cliente
+#                       (opcional; se vazio usa a pasta raiz da service account)
+#   audit_max_pages  -> limite de paginas para o crawler da auditoria (default 100)
+
+clients:
+  - name: "Cliente Exemplo"
+    site_url: "https://www.exemplo.com.br"
+    windsor_account: ""
+    drive_folder_id: ""
+    audit_max_pages: 100
+    keywords:
+      - "agencia de marketing digital"
+      - "como fazer seo"
+      - "trafego pago para pequenas empresas"
